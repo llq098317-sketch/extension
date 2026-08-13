@@ -1,0 +1,165 @@
+/* 随译 inject.css —— 注入页面的样式 */
+
+/* 悬浮窗根容器 */
+#suiyi-fab-root {
+  position: fixed;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#suiyi-fab {
+  width: 23px;
+  height: 23px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  background: rgba(30, 30, 30, 0.75);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+#suiyi-fab:hover {
+  transform: scale(1.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+#suiyi-fab.suiyi-dragging {
+  cursor: ns-resize;
+  transform: scale(1.05);
+  opacity: 0.9;
+}
+
+/* 设置小按钮：默认隐藏，悬停淡入 */
+#suiyi-settings-btn {
+  margin-top: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+  background: rgba(30, 30, 30, 0.75);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+#suiyi-fab-root:hover #suiyi-settings-btn,
+#suiyi-settings-btn.suiyi-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* 译文容器 */
+[data-mt-role="translation"] {
+  display: block;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+/* 设置面板遮罩与卡片 */
+#suiyi-panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* el-switch 风格滑动开关（随译 UI，防网页样式冲突用前缀） */
+.suiyi-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  margin-bottom: 12px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.suiyi-switch input {
+  display: none;
+}
+.suiyi-switch .suiyi-switch-track {
+  position: relative;
+  width: 40px;
+  height: 20px;
+  border-radius: 10px;
+  background: #dcdfe6;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+.suiyi-switch .suiyi-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s ease;
+}
+.suiyi-switch input:checked + .suiyi-switch-track {
+  background: #409eff;
+}
+.suiyi-switch input:checked + .suiyi-switch-track .suiyi-switch-thumb {
+  transform: translateX(20px);
+}
+.suiyi-switch .suiyi-switch-text {
+  font-size: 13px;
+  color: #333;
+}
+.suiyi-switch .suiyi-sub {
+  display: block;
+  font-size: 11px;
+  color: #999;
+  margin-top: 2px;
+}
+
+/* 翻译加载小圆环（spinner） */
+.suiyi-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(128, 128, 128, 0.3);
+  border-top-color: #409eff;
+  border-radius: 50%;
+  animation: suiyi-spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-left: 0.4em;
+}
+.suiyi-spinner-block {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(128, 128, 128, 0.3);
+  border-top-color: #409eff;
+  border-radius: 50%;
+  animation: suiyi-spin 0.8s linear infinite;
+  margin: 0.4em 0;
+}
+@keyframes suiyi-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

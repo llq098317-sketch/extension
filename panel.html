@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>随译设置</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+      color: #222;
+      width: 320px;
+      padding: 16px 18px;
+      margin: 0;
+      box-sizing: border-box;
+    }
+    h2 { margin: 0 0 14px; font-size: 17px; font-weight: 600; }
+    label { display: block; margin-bottom: 10px; }
+    .row { display: flex; gap: 10px; }
+    .row label { flex: 1; }
+    input[type="password"],
+    input[type="text"],
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 4px;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 13px;
+      background: #fff;
+    }
+    .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    /* el-switch 风格滑动开关 */
+    .ds-switch {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      margin-bottom: 12px;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .ds-switch input { display: none; }
+    .ds-switch .ds-track {
+      position: relative;
+      width: 40px;
+      height: 20px;
+      border-radius: 10px;
+      background: #dcdfe6;
+      transition: background 0.2s ease;
+      flex-shrink: 0;
+    }
+    .ds-switch .ds-thumb {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+      transition: transform 0.2s ease;
+    }
+    .ds-switch input:checked + .ds-track {
+      background: #409eff;
+    }
+    .ds-switch input:checked + .ds-track .ds-thumb {
+      transform: translateX(20px);
+    }
+    .ds-switch .ds-switch-text { font-size: 13px; color: #333; }
+    .ds-switch .ds-sub {
+      display: block;
+      font-size: 11px;
+      color: #999;
+      margin-top: 2px;
+    }
+    .actions { display: flex; gap: 10px; margin-top: 14px; }
+    button {
+      flex: 1;
+      padding: 8px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid #ccc;
+      background: #fff;
+    }
+    button.primary { background: #2563eb; color: #fff; border: none; font-weight: 600; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .status { margin-top: 10px; font-size: 12px; min-height: 16px; color: #555; }
+    .status.ok { color: #16a34a; }
+    .status.err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h2>随译设置</h2>
+  <label>DeepSeek API Key
+    <input id="opt-apikey" type="password" placeholder="sk-...">
+  </label>
+  <label>模型名
+    <input id="opt-model" type="text" placeholder="deepseek-v4-flash">
+  </label>
+  <label>翻译快捷键
+    <input id="opt-hotkey" type="text" readonly placeholder="点击后按下组合键，如 Alt+A">
+  </label>
+  <div class="row">
+    <label>源语言
+      <select id="opt-source"></select>
+    </label>
+    <label>目标语言
+      <select id="opt-target"></select>
+    </label>
+  </div>
+  <label>翻译范围
+    <select id="opt-mode">
+      <option value="page">整页</option>
+      <option value="main">仅正文主体</option>
+    </select>
+  </label>
+  <label>译文样式
+    <select id="opt-style">
+      <option value="same">与原文相同样式</option>
+      <option value="underline">下划线</option>
+      <option value="highlight">高亮背景</option>
+      <option value="block">左侧条带</option>
+    </select>
+  </label>
+  <label class="ds-switch">
+    <input id="opt-always" type="checkbox">
+    <span class="ds-track"><span class="ds-thumb"></span></span>
+    <span class="ds-switch-text">总是翻译外语网页
+      <span class="ds-sub">打开网页自动翻译</span>
+    </span>
+  </label>
+  <label>当页面语言是
+    <input id="opt-always-langs" type="text" placeholder="en, ja, ko, fr, de...">
+  </label>
+  <label class="ds-switch">
+    <input id="opt-skipnumbers" type="checkbox">
+    <span class="ds-track"><span class="ds-thumb"></span></span>
+    <span class="ds-switch-text">跳过纯数字块
+      <span class="ds-sub">如 12345、1.2.3、2024</span>
+    </span>
+  </label>
+  <label class="ds-switch">
+    <input id="opt-lazymode" type="checkbox">
+    <span class="ds-track"><span class="ds-thumb"></span></span>
+    <span class="ds-switch-text">滚动到哪译到哪
+      <span class="ds-sub">关闭则一次翻译整页</span>
+    </span>
+  </label>
+  <label class="ds-switch">
+    <input id="opt-immersive" type="checkbox">
+    <span class="ds-track"><span class="ds-thumb"></span></span>
+    <span class="ds-switch-text">沉浸式翻译
+      <span class="ds-sub">译文在原文下方；关闭则译文替换原文</span>
+    </span>
+  </label>
+  <div class="actions">
+    <button id="btn-test">测试连接</button>
+    <button id="btn-save" class="primary">保存</button>
+  </div>
+  <div id="status" class="status"></div>
+
+  <script>
+    (function () {
+      "use strict";
+      var LANGS = [
+        ["auto", "自动检测"],
+        ["zh", "中文"],
+        ["en", "英语"],
+        ["ja", "日语"],
+        ["ko", "韩语"],
+        ["fr", "法语"],
+        ["de", "德语"],
+        ["es", "西班牙语"],
+        ["ru", "俄语"],
+        ["pt", "葡萄牙语"],
+        ["it", "意大利语"],
+        ["ar", "阿拉伯语"]
+      ];
+      var TARGETS = [
+        ["zh-Hans", "简体中文"],
+        ["zh-Hant", "繁体中文"],
+        ["en", "英语"],
+        ["ja", "日语"],
+        ["ko", "韩语"],
+        ["fr", "法语"],
+        ["de", "德语"],
+        ["es", "西班牙语"],
+        ["ru", "俄语"],
+        ["pt", "葡萄牙语"],
+        ["it", "意大利语"],
+        ["ar", "阿拉伯语"]
+      ];
+      var DEFAULTS = {
+        apiKey: "",
+        model: "deepseek-v4-flash",
+        sourceLang: "auto",
+        targetLang: "zh-Hans",
+        translateMode: "page",
+        style: "same",
+        alwaysTranslate: false,
+        alwaysLanguages: ["en", "ja", "ko", "fr", "de", "es", "ru", "pt", "it"],
+        skipPureNumbers: true,
+        lazyMode: true,
+        immersiveMode: true,
+        hotkey: "Alt+A"
+      };
+
+      function fillSelect(sel, opts) {
+        sel.innerHTML = "";
+        opts.forEach(function (o) {
+          var option = document.createElement("option");
+          option.value = o[0];
+          option.textContent = o[1];
+          sel.appendChild(option);
+        });
+      }
+
+      fillSelect(document.getElementById("opt-source"), LANGS);
+      fillSelect(document.getElementById("opt-target"), TARGETS);
+
+      var apiKey = document.getElementById("opt-apikey");
+      var model = document.getElementById("opt-model");
+      var source = document.getElementById("opt-source");
+      var target = document.getElementById("opt-target");
+      var mode = document.getElementById("opt-mode");
+      var style = document.getElementById("opt-style");
+      var always = document.getElementById("opt-always");
+      var alwaysLangs = document.getElementById("opt-always-langs");
+      var skipNumbers = document.getElementById("opt-skipnumbers");
+      var lazyMode = document.getElementById("opt-lazymode");
+      var immersive = document.getElementById("opt-immersive");
+      var hotkeyInput = document.getElementById("opt-hotkey");
+      var loadedHotkey = DEFAULTS.hotkey;
+      var statusEl = document.getElementById("status");
+
+      function load() {
+        chrome.storage.sync.get(DEFAULTS, function (data) {
+          apiKey.value = data.apiKey || "";
+          model.value = data.model || DEFAULTS.model;
+          source.value = data.sourceLang || "auto";
+          target.value = data.targetLang || "zh-Hans";
+          mode.value = data.translateMode || "page";
+          style.value = data.style || "same";
+          always.checked = !!data.alwaysTranslate;
+          alwaysLangs.value = (data.alwaysLanguages || []).join(", ");
+          skipNumbers.checked = data.skipPureNumbers !== false;
+          lazyMode.checked = data.lazyMode !== false;
+          immersive.checked = data.immersiveMode !== false;
+          loadedHotkey = data.hotkey || DEFAULTS.hotkey;
+          hotkeyInput.value = loadedHotkey;
+        });
+      }
+
+      function collect() {
+        return {
+          apiKey: apiKey.value.trim(),
+          model: model.value.trim() || DEFAULTS.model,
+          sourceLang: source.value,
+          targetLang: target.value,
+          translateMode: mode.value,
+          style: style.value,
+          alwaysTranslate: always.checked,
+          alwaysLanguages: alwaysLangs.value.split(",").map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean),
+          skipPureNumbers: skipNumbers.checked,
+          lazyMode: lazyMode.checked,
+          immersiveMode: immersive.checked,
+          hotkey: hotkeyInput.value || DEFAULTS.hotkey
+        };
+      }
+
+      // 快捷键录制
+      var recordingHotkey = false;
+      hotkeyInput.addEventListener("click", function () {
+        recordingHotkey = true;
+        hotkeyInput.value = "请按下快捷键...";
+        hotkeyInput.style.background = "#fff7d6";
+      });
+      hotkeyInput.addEventListener("keydown", function (e) {
+        if (!recordingHotkey) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        var parts = [];
+        if (e.ctrlKey) { parts.push("Ctrl"); }
+        if (e.altKey) { parts.push("Alt"); }
+        if (e.shiftKey) { parts.push("Shift"); }
+        if (e.metaKey) { parts.push("Meta"); }
+        var key = e.key;
+        if (!key || key === "Control" || key === "Alt" || key === "Shift" || key === "Meta") {
+          return;
+        }
+        if (key === " ") {
+          key = "Space";
+        } else if (key.length === 1) {
+          key = key.toUpperCase();
+        } else if (/^Key[A-Z]$/i.test(key)) {
+          key = key.slice(3).toUpperCase();
+        } else if (/^Digit\d$/.test(key)) {
+          key = key.slice(5);
+        }
+        parts.push(key);
+        if (parts.length >= 2) {
+          recordingHotkey = false;
+          hotkeyInput.value = parts.join("+");
+          hotkeyInput.style.background = "#fff";
+        }
+      });
+      hotkeyInput.addEventListener("blur", function () {
+        if (recordingHotkey) {
+          recordingHotkey = false;
+          hotkeyInput.value = (typeof loadedHotkey !== "undefined" && loadedHotkey) ? loadedHotkey : DEFAULTS.hotkey;
+          hotkeyInput.style.background = "#fff";
+        }
+      });
+
+      document.getElementById("btn-save").addEventListener("click", function () {
+        var settings = collect();
+        chrome.storage.sync.set(settings, function () {
+          statusEl.textContent = "✓ 已保存";
+          statusEl.className = "status ok";
+        });
+      });
+
+      document.getElementById("btn-test").addEventListener("click", function () {
+        var btn = document.getElementById("btn-test");
+        btn.disabled = true;
+        btn.textContent = "测试中…";
+        statusEl.textContent = "";
+        statusEl.className = "status";
+        chrome.runtime.sendMessage({
+          type: "ds-test-connection",
+          apiKey: apiKey.value.trim(),
+          model: model.value.trim() || DEFAULTS.model
+        }, function (resp) {
+          btn.disabled = false;
+          btn.textContent = "测试连接";
+          if (resp && resp.ok) {
+            statusEl.textContent = "✓ 连接成功";
+            statusEl.className = "status ok";
+          } else {
+            statusEl.textContent = "✗ " + ((resp && resp.error) || "未知错误");
+            statusEl.className = "status err";
+          }
+        });
+      });
+
+      load();
+    })();
+  </script>
+</body>
+</html>

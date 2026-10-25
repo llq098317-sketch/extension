@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "随译",
-  "version": "0.2.15",
+  "version": "0.2.42",
   "description": "右侧悬浮窗一键沉浸式翻译网页，译文以原文同款样式嵌在原文下方，接入 DeepSeek。",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": ["https://api.deepseek.com/*"],

@@ -32,7 +32,6 @@
   var settings = {};
   var translated = false; // 当前整页是否处于已翻译状态
   var translating = false; // 是否正在翻译中
-  var cleanupFns = []; // 页面上可清除的事件监听（还原后移除）
   var bgReady = false;
 
   var state = {
@@ -164,22 +163,23 @@
     return node.nodeType === 1 && (node.getAttribute("data-mt-role") === "translation" || node.getAttribute("data-suiyi-translated") === "1");
   }
 
-  // 块是否已翻译：直接模式（块内译文 div）或替换模式（块自身 data-suiyi-replaced）
+  // 块是否已翻译：块级标记（data-suiyi-state，O(1)）或译文 div 或替换模式标记。
   function isBlockTranslated(el) {
     if (!el || el.nodeType !== 1) {
       return false;
     }
+    if (el.getAttribute("data-suiyi-state") === "translated") {
+      return true;
+    }
+    if (el.getAttribute("data-suiyi-original-hidden") === "1") {
+      return true;
+    }
     if (el.getAttribute("data-suiyi-replaced") === "1") {
       return true;
     }
-    // 直接模式：块内是否有译文节点
-    var children = el.children;
-    for (var i = 0; i < children.length; i += 1) {
-      if (isTranslatedNode(children[i])) {
-        return true;
-      }
-    }
-    return false;
+    // 整棵子树内是否有译文节点
+    var translated = el.querySelector ? el.querySelector('[data-mt-role="translation"], [data-suiyi-translated="1"]') : null;
+    return !!translated;
   }
 
   // ---------- 主题样式 ----------
@@ -214,17 +214,6 @@
   }
 
   // ---------- DOM 收集：按块收集文本 ----------
-  function isVisible(el) {
-    if (!el || el.nodeType !== 1) {
-      return false;
-    }
-    var style = getComputedStyle(el, null);
-    if (!style) {
-      return false;
-    }
-    return style.display !== "none" && style.visibility !== "hidden" && parseFloat(style.opacity || "1") > 0.05;
-  }
-
   function isInViewport(el) {
     if (el.getBoundingClientRect) {
       var rect = el.getBoundingClientRect();
@@ -320,15 +309,67 @@
     return false;
   }
 
+  // 判断元素是否真正可见（沿父链检查）：
+  // - 自身或任一祖先 display:none / visibility:hidden / opacity≈0
+  // - 任一祖先 aria-hidden="true"（下拉菜单/隐藏面板常见标记）
+  // - 任一祖先有 hidden 属性
+  // - 块级元素自身尺寸为 0（折叠面板、CSS-only 隐藏）
+  // 目的：hover 才出现的下拉菜单/tooltip，在未显示时不应被翻译。
   function isVisible(el) {
     if (!el || el.nodeType !== 1) {
       return false;
     }
-    var style = getComputedStyle(el, null);
-    if (!style) {
-      return false;
+    var n = el;
+    while (n && n.nodeType === 1 && n.nodeName !== "BODY") {
+      var style = getComputedStyle(n, null);
+      if (style) {
+        if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") <= 0.05) {
+          return false;
+        }
+        // 借鉴沉浸式翻译 $j()：offsetParent === null 说明元素未参与渲染
+        // （通常因自身或某祖先 display:none，即使没显式设 hidden 也一样）。
+        // 这是比逐层遍历更省事的判断，覆盖"hover 才显示"的 tooltip/下拉未显示时的场景。
+        // 豁免内联元素：内联元素（span/a 等）的 offsetParent 是最近的块级祖先，
+        // 即使内联元素可见也可能为 null 的只是它自身不占行，需排除误伤。
+        if (!INLINE_TAGS[n.nodeName] && style.position !== "fixed" && n.offsetParent === null) {
+          return false;
+        }
+        // 视觉隐藏：clip / clip-path（sr-only 屏幕阅读器类常用，尺寸 1px 且被裁剪）
+        if (style.clipPath && style.clipPath !== "none") {
+          return false;
+        }
+        if (style.clip && style.clip !== "auto" && /rect\(0[px\s,]*0[px\s,]*0[px\s,]*0/.test(style.clip)) {
+          return false;
+        }
+        // 极小而裁剪：width/height 都 < 2px 且 overflow hidden（sr-only 典型）
+        if (style.position === "absolute" && parseFloat(style.width) < 2 && parseFloat(style.height) < 2 && style.overflow === "hidden") {
+          return false;
+        }
+      }
+      if (n.getAttribute && n.getAttribute("aria-hidden") === "true") {
+        return false;
+      }
+      if (n.hasAttribute && n.hasAttribute("hidden")) {
+        return false;
+      }
+      // 视觉隐藏类名（GitHub/常见框架）：sr-only / visually-hidden
+      if (n.classList && (n.classList.contains("sr-only") || n.classList.contains("visually-hidden") || n.classList.contains("visuallyhidden"))) {
+        return false;
+      }
+      n = n.parentNode;
     }
-    return style.display !== "none" && style.visibility !== "hidden" && parseFloat(style.opacity || "1") > 0.05;
+    // 块级元素自身尺寸为 0 视为不可见（内联元素允许高度为 0）
+    if (el.getBoundingClientRect) {
+      var rect = el.getBoundingClientRect();
+      if (rect && rect.width === 0 && rect.height === 0) {
+        var tag = el.nodeName;
+        var isInline = tag === "A" || tag === "SPAN" || tag === "EM" || tag === "STRONG" || tag === "B" || tag === "I" || tag === "U" || tag === "MARK" || tag === "SMALL" || tag === "SUB" || tag === "SUP" || tag === "ABBR" || tag === "TIME";
+        if (!isInline) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   function isInViewport(el) {
@@ -357,10 +398,14 @@
     return /^[vV]?[\d][\d.,%\-()/ ]*$/.test(trimmed);
   }
 
-  // 文本是否已主要是目标语言（如中文）：中文字符占比超过阈值则视为"已是目标语言"，跳过翻译。
+  // 文本是否已主要是目标语言（如中文）：是则跳过翻译，不重复翻译。
+  // 借鉴沉浸式翻译：不靠单一字符比例，而是用「语义特征」判断——中文夹带少量外文词
+  // （如"加载（Edge）""Steam 商店"）仍判为中文；中文为主但夹杂大量/长段外文则判混合，照常翻译。
+  // 纯 90% 阈值有两个死角：夹带品牌词的中文被误判送译；英文为主+少量中文被误跳过。
   function isTargetLanguageText(text) {
     var target = (settings.targetLang || "zh-Hans").toLowerCase();
-    var isZh = target === "zh-hans" || target === "zh-hant" || target === "zh" || target === "zh-cn";
+    // 仿沉浸式 jr()：zh-CN / zh-TW / zh-Hant 视为同语言（ignoreZhCNandZhTW）
+    var isZh = target === "zh-hans" || target === "zh-hant" || target === "zh" || target === "zh-cn" || target === "zh-tw";
     if (!isZh) {
       return false; // 目标语言非中文时不做检测
     }
@@ -369,14 +414,30 @@
     }
     var cjk = text.match(/[一-鿿㐀-䶿]/g);
     if (!cjk) {
-      return false;
+      return false; // 一个汉字都没有 → 不是中文，翻译
     }
-    // 中文字符占可显示字符的比例超过 50% 视为已是中文
+    // 去掉空白/数字/标点/符号后，统计中文字符在「有意义字符」中的占比
     var significant = text.replace(/[\s\d\p{P}\p{S}]/gu, "");
     if (significant.length === 0) {
       return false;
     }
-    return cjk.length / significant.length > 0.5;
+    var ratio = cjk.length / significant.length;
+    // 分支 1：绝大多数是中文 → 已是中文，跳过（对应沉浸式 kPe 的整页级兜底）
+    if (ratio > 0.8) {
+      return true;
+    }
+    // 分支 2：中文占比 >30% 且至少 2 个汉字，只夹带少量短外文词
+    //  → 视为已是中文（"加载（Edge）"：2 汉字 / 6 有效字符 = 33%，1 个外文词，跳过）
+    // 注意：夹带大量或长段外文（如 Steam 英文补丁）时，外文词数量/长度超限 → 判混合，照常翻译
+    if (ratio > 0.3 && cjk.length >= 2) {
+      var latinWords = text.match(/[A-Za-z][A-Za-z'-]*/g) || [];
+      // 外文词少且短才视为"夹带"，否则是英文为主（如 Steam 补丁），应翻译
+      var latinTotal = latinWords.join("").length;
+      if (latinWords.length <= 3 && latinTotal <= 12) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // 是否在随译自己的 UI（悬浮窗）内：这些文字不应被翻译
@@ -395,7 +456,21 @@
   // 整页模式下返回 {block, texts:[..]}，正文主体模式下返回 {block, texts:[..]}（限定在 article/main）。
   // 每个块内的多个文本节点合并为一段文本；超过 MAX_BLOCK_CHARS 则按字符切分，保证单次请求规模可控。
   var MAX_BLOCK_CHARS = 1400;
+  // 块 ID 状态存 WeakMap（借鉴沉浸式翻译的 D4/Sf 等 18 个 WeakMap）。
+  // 关键：key 是 DOM 节点弱引用——节点被移除（SPA 页面 React 替换节点）后，
+  // 对应的 id 会被 GC 自动回收，不残留。旧实现 el.__suiyi_id__ 把属性永久挂在
+  // 元素上，节点不回收则状态不释放，长会话/SPA 页面持续泄漏。
+  var blockIdMap = new WeakMap();
   var blockSeq = 0;
+
+  function getBlockId(el) {
+    var id = blockIdMap.get(el);
+    if (!id) {
+      id = ++blockSeq;
+      blockIdMap.set(el, id);
+    }
+    return id;
+  }
 
   function collectTexts(mode) {
     var root = document.body;
@@ -407,17 +482,15 @@
       }
     }
 
-    var map = {}; // key: __suiyi_id__ -> { el, texts: [] }
+    var map = {}; // key: blockId -> { el, texts: [] }
     var order = [];
 
     function getBlockEntry(el) {
-      if (!el.__suiyi_id__) {
-        el.__suiyi_id__ = (++blockSeq);
-      }
-      var entry = map[el.__suiyi_id__];
+      var id = getBlockId(el);
+      var entry = map[id];
       if (!entry) {
         entry = { el: el, texts: [] };
-        map[el.__suiyi_id__] = entry;
+        map[id] = entry;
         order.push(entry);
       }
       return entry;
@@ -430,8 +503,11 @@
       if (text.length > 0) {
         var parent = node.parentNode;
         var parentBlock = nearestBlock(parent);
-        // 跳过已翻译的祖先/块、隐藏节点、不翻译容器（script/style/textarea 等，沿父链检查）、随译 UI
-        if (parent && (isTranslatedNode(parent) || isBlockTranslated(parentBlock) || isInSkipContainer(parent) || !isVisible(parentBlock || parent) || isInSuiyiUI(parent))) {
+        // 跳过已翻译节点自身、隐藏节点、不翻译容器（script/style/textarea 等，沿父链检查）、随译 UI。
+        // 注意：不用 isBlockTranslated(parentBlock) —— 巨型块（如 Steam 补丁卡片）翻译后译文在块内，
+        // 用它会整块跳过，导致块内未翻译的英文也被丢弃。这里只跳过译文节点自身，块内英文总会重新收集，
+        // 重复翻译由 renderBlock 的防重入（isBlockTranslated(el)）兜底。
+        if (parent && (isTranslatedNode(parent) || isInSkipContainer(parent) || !isVisible(parent) || isInSuiyiUI(parent))) {
           node = walker.nextNode();
           continue;
         }
@@ -466,8 +542,9 @@
         return;
       }
       var chunks = splitText(joined, MAX_BLOCK_CHARS);
+      var blockId = getBlockId(entry.el);
       chunks.forEach(function (chunk, idx) {
-        units.push({ el: entry.el, text: chunk, id: entry.el.__suiyi_id__ + (chunks.length > 1 ? "-" + idx : "") });
+        units.push({ el: entry.el, text: chunk, id: blockId + (chunks.length > 1 ? "-" + idx : "") });
       });
     });
     return units;
@@ -542,6 +619,52 @@
   // ---------- 译文渲染 ----------
   // 默认：译文以 block 插到原文块末尾，显示在"原文正下方"。
   // 当原文块宽度不足（框太小）时，改为内联，译文紧跟原文横向排列（A+X）。
+  // 找块内文本样式的"代表元素"——统计所有文本节点父元素的 fontWeight，
+  // 取出现频率最高的那个作为译文样式参考，避免块内第一个元素是 <strong> 时整段译文被加粗。
+  function getTextStyleRef(el) {
+    if (!el) {
+      return null;
+    }
+    var weightCount = {};
+    var weightRef = {};
+    var total = 0;
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    var n = walker.nextNode();
+    while (n) {
+      if ((n.nodeValue || "").trim().length > 0 && n.parentNode && n.parentNode.nodeType === 1) {
+        total += 1;
+        var p = n.parentNode;
+        var w = null;
+        try {
+          w = getComputedStyle(p, null).fontWeight;
+        } catch (e) {
+          w = null;
+        }
+        var key = w || "";
+        if (!weightCount[key]) {
+          weightCount[key] = 0;
+          weightRef[key] = p;
+        }
+        weightCount[key] += 1;
+      }
+      n = walker.nextNode();
+    }
+    if (total === 0) {
+      return el;
+    }
+    // 取出现最多的 fontWeight 对应的元素
+    var bestKey = "";
+    var bestCount = -1;
+    var key;
+    for (key in weightCount) {
+      if (weightCount[key] > bestCount) {
+        bestCount = weightCount[key];
+        bestKey = key;
+      }
+    }
+    return weightRef[bestKey] || el;
+  }
+
   function renderBlock(el, translatedText, theme) {
     if (!translatedText || !el) {
       return;
@@ -560,9 +683,9 @@
       return;
     }
 
-    // 同原文样式：继承父级
-    var ps = getComputedStyle(el, null);
-
+    // 译文 div 放在原文块内，靠 CSS 继承自动匹配原文样式（借鉴沉浸式翻译）。
+    // 不再手动 getComputedStyle 复制字体属性——译文在块内自然继承 font-family/size/color/line-height 等。
+    // 只设非继承的排版属性（wordWrap/overflowWrap/whiteSpace）。
     // 判断排列方式：块宽不足 → 内联跟在原文后；否则 → 下方 block
     var inline = shouldInlineTranslate(el);
 
@@ -576,6 +699,7 @@
     if (inline) {
       // 横向：译文作为行内元素跟在原文文本后面
       div.style.display = "inline";
+      div.style.margin = "0"; // 行内排列不留上下间距（CSS 默认 margin:8px 0 会撑出空白）
       div.style.marginLeft = "0.5em";
       // 行内元素不可加 paddingLeft/bottom，只保留可继承的样式
       if (theme.background) {
@@ -603,80 +727,157 @@
       }
     }
 
-    if (ps) {
-      div.style.fontSize = ps.fontSize;
-      div.style.fontFamily = ps.fontFamily;
-      div.style.color = ps.color;
-      div.style.lineHeight = ps.lineHeight;
-      div.style.fontWeight = ps.fontWeight;
-      div.style.fontStyle = ps.fontStyle;
-    }
-
     div.textContent = translatedText;
     div.style.opacity = "0";
     div.style.transition = "opacity 0.3s ease";
 
-    el.appendChild(div);
+    // 译文插到块内最后一个"直接可见文本节点"之后，紧跟原文实际位置。
+    // 避免巨型块（Steam 补丁卡片）译文被追加到块末尾导致"开头段没翻译"的错觉。
+    var anchor = findTextInsertPoint(el);
+    if (anchor && anchor.node) {
+      var refNode = anchor.node.nextSibling;
+      if (refNode) {
+        anchor.parent.insertBefore(div, refNode);
+      } else {
+        anchor.parent.appendChild(div);
+      }
+    } else {
+      el.appendChild(div);
+    }
+    // 块级标记（借鉴沉浸式翻译的 imt-state）：O(1) 判断已翻译，不依赖译文位置
+    el.setAttribute("data-suiyi-state", "translated");
     requestAnimationFrame(function () {
       div.style.opacity = "1";
     });
   }
 
-  // ---------- 替换模式（Edge 式：就地替换文本节点，DOM 结构零变化） ----------
-  // 原文快照：blockId -> [{node, original}]，还原时改回 nodeValue。
-  var replaceSnapshots = {};
-
-  function renderReplaceMode(el, translatedText) {
-    // 收集块内文本节点（排除已翻译的嵌套块）
-    var textNodes = [];
+  // 找块内"最后一个直接文本节点"的位置，译文插在这里（紧跟原文）。
+  // 返回 { node, parent }：node 是最后一个直接文本节点，parent 是其父。
+  function findTextInsertPoint(el) {
     var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
     var n = walker.nextNode();
+    var last = null;
     while (n) {
-      // 跳过随译 UI 内的文本
-      if (!isInSuiyiUI(n.parentNode)) {
-        textNodes.push(n);
+      if ((n.nodeValue || "").trim().length > 0 && n.parentNode && !isTranslatedNode(n.parentNode)) {
+        last = n;
       }
       n = walker.nextNode();
     }
-    if (textNodes.length === 0) {
+    if (last) {
+      return { node: last, parent: last.parentNode };
+    }
+    return null;
+  }
+
+  // ---------- 替换模式（沉浸式方案：原文节点永不被破坏） ----------
+  // 原文节点完全不动，译文作为独立 div 追加；原文本体用标记隐藏（保留在 DOM）。
+  // 还原时按 data-suiyi-original-hidden 标记恢复 display，杜绝"原文消失"。
+
+  // 块是否适合"就地替换"：块内容应主要是文本 + 少量内联样式。
+  // 若块内有多个独立子元素（如导航的多个 a/li、多列布局），就地替换会清空结构，退回下方模式。
+  function isSimpleTextBlock(el) {
+    if (!el || el.nodeType !== 1) {
+      return false;
+    }
+    var structural = 0;
+    var children = el.children;
+    for (var i = 0; i < children.length; i += 1) {
+      var child = children[i];
+      if (!INLINE_TAGS[child.nodeName]) {
+        structural += 1;
+      }
+      if (structural > 1) {
+        return false; // 多个块级子元素 → 复合结构
+      }
+    }
+    // 块内文本节点数（直接属于此块）
+    var textCount = 0;
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    var n = walker.nextNode();
+    while (n) {
+      if ((n.nodeValue || "").trim().length > 0) {
+        textCount += 1;
+      }
+      n = walker.nextNode();
+    }
+    return textCount <= 2; // 文本节点很少 → 简单块，适合就地替换
+  }
+
+  function renderReplaceMode(el, translatedText) {
+    // 复合结构（导航/多列/列表）不适合就地替换，退回下方模式
+    if (!isSimpleTextBlock(el)) {
+      // 译文 appendChild 到块内 → CSS 继承自动匹配样式
+      var div = document.createElement("div");
+      div.setAttribute("data-mt-role", "translation");
+      div.setAttribute("data-suiyi-translated", "1");
+      div.style.display = "block";
+      div.style.wordWrap = "break-word";
+      div.style.overflowWrap = "break-word";
+      div.style.whiteSpace = "pre-wrap";
+      div.textContent = translatedText;
+      el.appendChild(div);
       return;
     }
-    // 译文到达，移除加载圆环（在收集快照前，避免把 spinner 文本也算进去）
+    // 译文到达，移除加载圆环
     removeBlockSpinner(el);
-    // 存快照
-    var blockId = el.__suiyi_id__;
-    if (blockId) {
-      replaceSnapshots[blockId] = textNodes.map(function (tn) {
-        return { node: tn, original: tn.nodeValue };
-      });
+    // 替换模式（简单块）：原文节点完全不动，块 display:none（原文保留在 DOM），
+    // 译文作为块的兄弟插到块之后 → 译文可见、原文不破坏、杜绝消失。
+    // 注意：译文是块的兄弟（不在块内），CSS 继承失效，必须手动复制块的字体样式。
+    var div = document.createElement("div");
+    div.setAttribute("data-mt-role", "translation");
+    div.setAttribute("data-suiyi-translated", "1");
+    div.setAttribute("data-suiyi-replace", "1");
+    div.style.display = "block";
+    div.style.wordWrap = "break-word";
+    div.style.overflowWrap = "break-word";
+    div.style.whiteSpace = "pre-wrap";
+    var styleRef2 = getTextStyleRef(el);
+    var ps2 = styleRef2 ? getComputedStyle(styleRef2, null) : null;
+    if (ps2) {
+      div.style.fontSize = ps2.fontSize;
+      div.style.fontFamily = ps2.fontFamily;
+      div.style.color = ps2.color;
+      div.style.lineHeight = ps2.lineHeight;
+      div.style.fontWeight = ps2.fontWeight;
+      div.style.fontStyle = ps2.fontStyle;
     }
-    // 第一个文本节点放译文，其余清空（保留 inline 元素骨架，布局不受影响）
-    textNodes[0].nodeValue = translatedText;
-    for (var i = 1; i < textNodes.length; i += 1) {
-      textNodes[i].nodeValue = "";
+    div.textContent = translatedText;
+
+    // 原文块隐藏（保留在 DOM，标记以便还原）
+    if (el.getAttribute("data-suiyi-original-hidden") !== "1") {
+      el.setAttribute("data-suiyi-original-hidden", "1");
+      el.setAttribute("data-suiyi-original-display", el.style.display || "");
+      el.style.display = "none";
     }
-    el.setAttribute("data-suiyi-replaced", "1");
+    // 译文作为块的兄弟插到块之后
+    if (el.parentNode) {
+      if (el.nextSibling) {
+        el.parentNode.insertBefore(div, el.nextSibling);
+      } else {
+        el.parentNode.appendChild(div);
+      }
+    }
   }
 
   function restoreReplaceMode() {
-    var blocks = document.querySelectorAll('[data-suiyi-replaced="1"]');
-    var list = Array.prototype.slice.call(blocks);
-    list.forEach(function (el) {
-      var snap = replaceSnapshots[el.__suiyi_id__];
-      if (snap) {
-        snap.forEach(function (item) {
-          if (item.node && item.node.parentNode) {
-            item.node.nodeValue = item.original;
-          }
-        });
-      }
-      el.removeAttribute("data-suiyi-replaced");
+    // 还原隐藏的原文本体
+    var originals = document.querySelectorAll('[data-suiyi-original-hidden="1"]');
+    Array.prototype.slice.call(originals).forEach(function (el) {
+      el.style.display = el.getAttribute("data-suiyi-original-display") || "";
+      el.removeAttribute("data-suiyi-original-hidden");
+      el.removeAttribute("data-suiyi-original-display");
     });
   }
 
   // 判断原文块是否"框不足"：块宽 < 视口 45% 或 < 360px 视为窄块，译文横向排列
-  function shouldInlineTranslate(el) {    if (!el) {
+  function shouldInlineTranslate(el) {
+    if (!el) {
       return false;
+    }
+    // 块自身是行内/行内块（内容自然流排列）→ 译文也应内联，避免 block 打乱布局
+    var own = getComputedStyle(el, null);
+    if (own && (own.display === "inline" || own.display === "inline-block" || own.display === "inline-flex" || own.display === "inline-grid")) {
+      return true;
     }
     var w = el.clientWidth;
     if (!w) {
@@ -724,7 +925,11 @@
   // ---------- 译文缓存 ----------
   // 缓存键 = 块原文文本 hash。内容不变则复用译文，刷新页面后 session 缓存自动清空。
   var CACHE_PREFIX = "suiyi_trans_cache_";
+  // 文本 → hash 的记忆化表。以原文全文为 key，必须限容：
+  // 无限滚动页面（Twitter/Reddit 等）每次加载新内容都会塞入新的完整文本，
+  // 不限制会随滚动无界增长（旧实现永不清理，是长会话下的真实泄漏）。
   var hashCache = {};
+  var HASH_CACHE_MAX = 1000;
 
   function simpleHash(str) {
     if (hashCache[str] !== undefined) {
@@ -735,6 +940,10 @@
       h = ((h << 5) - h + str.charCodeAt(i)) | 0;
     }
     h = Math.abs(h);
+    // 超限时整体清空（简单有效；hash 是纯函数，清空只是丢缓存，不影响正确性）
+    if (Object.keys(hashCache).length >= HASH_CACHE_MAX) {
+      hashCache = {};
+    }
     hashCache[str] = h;
     return h;
   }
@@ -753,6 +962,11 @@
   // 写入若干条缓存
   function saveTranslateCache(entries) {
     return bgSend("ds-cache-set", entries);
+  }
+
+  // 清空全部译文缓存
+  function clearTranslateCache() {
+    return bgSend("ds-cache-clear");
   }
 
   // ---------- 翻译执行 ----------
@@ -791,6 +1005,8 @@
     translating = true;
     translated = true;
     setButtonBusy(true);
+    // 确保 SPA 增量观察器在运行（还原时被 teardownObservers 销毁，这里重建）
+    ensurePageObserver();
 
     var theme = getThemeStyles(settings.style);
 
@@ -826,6 +1042,7 @@
           startLazyTranslate();
           if (errors.length > 0) {
             showToast("部分翻译失败：" + errors[0]);
+            showErrorDialog("翻译失败", errors);
           } else {
             showToast(cacheHits > 0 ? "翻译完成（含缓存）" : "翻译完成");
           }
@@ -841,6 +1058,7 @@
           startLazyTranslate();
           if (errors.length > 0) {
             showToast("部分翻译失败：" + errors[0]);
+            showErrorDialog("翻译失败", errors);
           } else {
             showToast("翻译完成");
           }
@@ -854,6 +1072,70 @@
   var lazyTimer = null;
   var lazyObserver = null;
   var scrollListener = null;
+
+  // SPA 增量翻译观察器：模块级单例，确保重建前先断开旧的（借鉴沉浸式翻译的
+  // Be.dynamicContainerObserver = Be.dynamicContainerObserver || xxx 单例模式 + teardown）。
+  // 旧实现在 loadSettingsAndInit 内 new MutationObserver，重入时旧实例从不 disconnect。
+  var pageObserver = null;
+
+  // 统一关闭所有观察器与监听（借鉴沉浸式翻译的总清理入口：
+  // 逐项 disconnect + 置 null）。翻译还原/页面卸载时调用，避免残留回调持续持有 DOM。
+  function teardownObservers() {
+    if (pageObserver) {
+      pageObserver.disconnect();
+      pageObserver = null;
+    }
+    stopLazyTranslate();
+  }
+
+  // 确保 SPA 增量翻译观察器处于运行状态。
+  // 单例：已存在则直接返回（借鉴沉浸式翻译 Be.dynamicContainerObserver || xxx 模式）。
+  // 还原时 teardownObservers 会销毁它，再次翻译时由这里重建，避免"还原后增量失效"。
+  function ensurePageObserver() {
+    if (pageObserver) {
+      return;
+    }
+    pageObserver = new MutationObserver(debounce(function (records) {
+      if (!translated || translating) {
+        return;
+      }
+      // 过滤：全部记录都来自随译自身插入的译文节点 → 跳过，不触发全页扫描
+      var onlyOwn = records.every(function (r) {
+        if (r.type !== "childList" || r.addedNodes.length === 0) {
+          return false;
+        }
+        for (var i = 0; i < r.addedNodes.length; i += 1) {
+          var n = r.addedNodes[i];
+          if (!(n.nodeType === 1 && n.getAttribute && n.getAttribute("data-mt-role") === "translation")) {
+            return false;
+          }
+        }
+        return true;
+      });
+      if (onlyOwn) {
+        return;
+      }
+      var missing = collectTexts(settings.translateMode || "page");
+      var fresh = missing.filter(function (unit) {
+        return !isBlockTranslated(unit.el);
+      });
+      if (fresh.length > 0) {
+        translating = true;
+        doTranslate(fresh, {
+          onDone: function () {
+            translating = false;
+          }
+        });
+      }
+    }, 1200));
+    // 借鉴沉浸式翻译：只监听 childList（新增节点），不监听全页 attributes。
+    // 旧实现 subtree:true + attributes:true 全页监听，我们自己的译文插入/标记写入会反复
+    // 触发回调，每次回调都 collectTexts() 全页 TreeWalker 扫描 → CPU/内存持续攀升。
+    pageObserver.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
 
   function startLazyTranslate() {
     if (!translated || translating) {
@@ -938,7 +1220,7 @@
     units.forEach(function (unit) {
       var chunks = splitText(unit.text, MAX_CHUNK);
       chunks.forEach(function (chunk) {
-        payloadUnits.push({ blockId: unit.el.__suiyi_id__, chunkId: chunkSeq, text: chunk });
+        payloadUnits.push({ blockId: getBlockId(unit.el), chunkId: chunkSeq, text: chunk });
         chunkSeq += 1;
       });
     });
@@ -998,7 +1280,7 @@
     // blockId -> DOM 元素 映射（收集 units 时建立）
     var blockEls = {};
     units.forEach(function (unit) {
-      blockEls[unit.el.__suiyi_id__] = unit.el;
+      blockEls[getBlockId(unit.el)] = unit.el;
     });
 
     var concurrency = 6;
@@ -1042,14 +1324,14 @@
         if (showBusy) {
           setButtonProgress(doneCount / totalChunks);
         }
-        // 边到边渲染：本批完成的块立即插入译文（块内分片可能跨批，需等齐分片）
-        // 先渲染本批独有完成的块；跨批块留到全部完成后兜底
+        // 边到边渲染：本批完成的块立即插入译文（块内分片可能跨批）
         var renderedNow = {};
         batch.forEach(function (pu) {
           if (!renderedNow[pu.blockId]) {
             renderedNow[pu.blockId] = true;
-            // 只有该块所有分片都已返回时才渲染
-            if (isBlockComplete(pu.blockId)) {
+            // 只要该块已有译文分片就渲染（缺的分片计入错误提示，不卡死整块）
+            var byBlock = blockTranslated[pu.blockId];
+            if (byBlock && Object.keys(byBlock).length > 0) {
               renderBlockData(pu.blockId);
             }
           }
@@ -1059,22 +1341,6 @@
       });
     }
 
-    // 判断某块的所有分片是否都已返回
-    function isBlockComplete(blockId) {
-      var byBlock = blockTranslated[blockId];
-      if (!byBlock) {
-        return false;
-      }
-      // 统计该块应有的分片数
-      var expected = 0;
-      units.forEach(function (unit) {
-        if (unit.el.__suiyi_id__ === blockId) {
-          expected += Math.ceil(unit.text.length / MAX_CHUNK);
-        }
-      });
-      return Object.keys(byBlock).length >= expected;
-    }
-
     var workers = [];
     for (var i = 0; i < concurrency; i += 1) {
       workers.push(worker());
@@ -1082,13 +1348,18 @@
     Promise.all(workers).then(function () {
       // 兜底渲染：处理跨批未齐的块
       units.forEach(function (unit) {
-        renderBlockData(unit.el.__suiyi_id__);
+        renderBlockData(getBlockId(unit.el));
+      });
+
+      // 清理所有块上的加载圆环（翻译结束，无论成败）
+      units.forEach(function (unit) {
+        removeBlockSpinner(unit.el);
       });
 
       // 写入缓存：块原文 hash → 译文
       var entries = {};
       units.forEach(function (unit) {
-        var blockId = unit.el.__suiyi_id__;
+        var blockId = getBlockId(unit.el);
         var byBlock = blockTranslated[blockId];
         if (!byBlock) {
           return;
@@ -1114,6 +1385,10 @@
         opts.onDone(errors);
       }
     }).catch(function (err) {
+      // 清理所有块上的加载圆环（避免 spinner 永久旋转）
+      units.forEach(function (unit) {
+        removeBlockSpinner(unit.el);
+      });
       if (opts && opts.onDone) {
         opts.onDone([String((err && err.message) || err)]);
       }
@@ -1135,7 +1410,7 @@
       }
     });
 
-    // 删除所有直接模式的译文节点
+    // 删除所有直接模式的译文节点，并清除块级标记
     var nodes = document.querySelectorAll('[data-mt-role="translation"]');
     var list = Array.prototype.slice.call(nodes);
     list.forEach(function (node) {
@@ -1143,8 +1418,15 @@
         node.parentNode.removeChild(node);
       }
     });
+    var marked = document.querySelectorAll('[data-suiyi-state="translated"]');
+    Array.prototype.slice.call(marked).forEach(function (el) {
+      el.removeAttribute("data-suiyi-state");
+    });
     translated = false;
-    stopLazyTranslate();
+    // 统一关闭观察器与监听（借鉴沉浸式翻译的清理入口），避免残留回调继续持有 DOM
+    teardownObservers();
+    // 清空 toast 引用（DOM 已由各自定时器移除，这里兜底释放数组里的残留引用）
+    toasts.length = 0;
     setButtonState();
   }
 
@@ -1154,6 +1436,29 @@
   var buttonIcon = null;
   var settingsBtn = null;
   var toasts = [];
+
+  // 悬浮球图标：内联 SVG（沉浸式翻译同款飞鸟 logo）。
+  // 不用 <img>/background-image，因为页面 CSP 的 img-src 可能禁 data: 协议（如 nexusmods 的
+  // img-src 'self' https://...），data URL 会被浏览器拦截。内联 SVG 是 DOM 元素，
+  // 不受任何 CSP 指令管辖（借鉴沉浸式翻译 wye 组件，也是内联 SVG）。
+  var FAB_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="100%" height="100%" fill="none">' +
+    '<path d="M0 14C0 6.26801 6.26801 0 14 0C21.732 0 28 6.26801 28 14C28 21.732 21.732 28 14 28C6.26801 28 0 21.732 0 14Z" fill="#ED6D8F"/>' +
+    '<path d="M7.30921 15.6381C7.53044 15.6381 7.70979 15.8175 7.70979 16.0387V19.0088C7.70979 19.934 8.45993 20.684 9.38526 20.684H11.7557C11.9769 20.684 12.1562 20.8634 12.1562 21.0846V22.152C12.1562 22.3732 11.9769 22.5526 11.7557 22.5526H9.38526C7.42782 22.5526 5.84099 20.966 5.84099 19.0088V16.0387C5.84099 15.8175 6.02034 15.6381 6.24157 15.6381H7.30921ZM18.9876 12.6944C19.1515 12.6944 19.2989 12.7943 19.3597 12.9466L22.9711 22.0036C23.076 22.2667 22.8822 22.5526 22.599 22.5526H21.4672C21.3016 22.5526 21.153 22.4506 21.0934 22.2961L20.2724 20.1673C20.2128 20.0128 20.0643 19.9108 19.8986 19.9108H16.7508C16.5852 19.9108 16.4366 20.0128 16.377 20.1673L15.556 22.2961C15.4964 22.4506 15.3478 22.5526 15.1822 22.5526H14.0504C13.7672 22.5526 13.5734 22.2667 13.6783 22.0036L17.2897 12.9466C17.3505 12.7943 17.4979 12.6944 17.6618 12.6944H18.9876ZM18.5116 15.6017C18.4456 15.4308 18.2038 15.4308 18.1378 15.6017L17.3016 17.7699C17.251 17.9011 17.3478 18.0423 17.4885 18.0423H19.1609C19.3016 18.0423 19.3984 17.9012 19.3478 17.7699L18.5116 15.6017ZM9.69589 5.30028C9.79943 4.8999 10.368 4.89991 10.4715 5.30028L11.1086 7.76368C11.3244 8.59845 11.9396 9.27221 12.7513 9.56299L14.9019 10.3334C15.2559 10.4602 15.2559 10.9608 14.9019 11.0876L12.7513 11.8581C11.9396 12.1489 11.3244 12.8226 11.1086 13.6574L10.4715 16.1208C10.368 16.5212 9.79943 16.5212 9.69589 16.1208L9.05884 13.6574C8.84297 12.8226 8.22786 12.1489 7.41615 11.8581L5.26548 11.0876C4.91151 10.9608 4.91151 10.4602 5.26548 10.3334L7.41615 9.56299C8.22786 9.27221 8.84297 8.59844 9.05884 7.76368L9.69589 5.30028ZM18.0064 6.20485C19.9639 6.20485 21.5507 7.79145 21.5507 9.74861V11.281C21.5507 11.5022 21.3713 11.6816 21.1501 11.6816H20.0825C19.8612 11.6816 19.6819 11.5022 19.6819 11.281V9.74861C19.6819 8.82341 18.9318 8.07338 18.0064 8.07338H14.4343C14.2131 8.07338 14.0337 7.89403 14.0337 7.6728V6.60543C14.0337 6.3842 14.2131 6.20486 14.4343 6.20485H18.0064Z" fill="white"/>' +
+    '</svg>';
+
+  // 恢复悬浮球为图标（空闲态），清除忙碌/进度文字
+  function renderFabIcon() {
+    if (!buttonIcon) {
+      return;
+    }
+    buttonIcon.innerHTML = FAB_ICON_SVG;
+    buttonIcon.style.background = "none";
+    buttonIcon.style.color = "transparent";
+    if (button) {
+      button.style.background = "transparent";
+    }
+  }
+
 
   function buildUI() {
     // 防重入：根节点已存在则不再创建（页面可能因守卫被注入多次）
@@ -1168,10 +1473,16 @@
     button.id = "suiyi-fab";
     button.setAttribute("title", "随译：翻译本页");
     button.setAttribute("role", "button");
-    button.style.cssText = "width: 23px; height: 23px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; user-select: none; box-shadow: 0 2px 10px rgba(0,0,0,0.2); transition: transform 0.15s ease, box-shadow 0.15s ease;";
+    button.style.cssText = "width: 29px; height: 29px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px; user-select: none; box-shadow: 0 2px 10px rgba(0,0,0,0.2); transition: transform 0.15s ease, box-shadow 0.15s ease;";
 
     buttonIcon = document.createElement("span");
-    buttonIcon.textContent = "译";
+    // 平时显示图标（内联 SVG），忙碌/进度时切换为文字
+    buttonIcon.style.width = "100%";
+    buttonIcon.style.height = "100%";
+    buttonIcon.style.display = "flex";
+    buttonIcon.style.alignItems = "center";
+    buttonIcon.style.justifyContent = "center";
+    renderFabIcon();
     button.appendChild(buttonIcon);
     host.appendChild(button);
 
@@ -1179,7 +1490,7 @@
     settingsBtn.id = "suiyi-settings-btn";
     settingsBtn.setAttribute("role", "button");
     settingsBtn.textContent = "⚙";
-    settingsBtn.style.cssText = "margin-top: 3px; width: 17px; height: 17px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 8px; opacity: 0; transform: translateY(-4px); transition: opacity 0.15s ease, transform 0.15s ease; pointer-events: none;";
+    settingsBtn.style.cssText = "margin-top: 4px; width: 21px; height: 21px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; opacity: 0; transform: translateY(-4px); transition: opacity 0.15s ease, transform 0.15s ease; pointer-events: none;";
     host.appendChild(settingsBtn);
 
     document.body.appendChild(host);
@@ -1207,10 +1518,10 @@
       shadow = "0 2px 10px rgba(0,0,0,0.15)";
       border = "1px solid rgba(0,0,0,0.12)";
     }
-    button.style.background = bg;
-    button.style.color = fg;
     button.style.boxShadow = shadow;
     button.style.border = border;
+    // 悬浮球背景用图标（透明底），不再铺色块
+    button.style.background = "transparent";
     settingsBtn.style.background = bg;
     settingsBtn.style.color = fg;
     settingsBtn.style.boxShadow = shadow;
@@ -1314,9 +1625,13 @@
       return;
     }
     if (busy) {
+      // 忙碌：图标换成进度文字，用半透明底保证可见
       buttonIcon.textContent = "…";
+      buttonIcon.style.background = "none";
+      buttonIcon.style.color = "#fff";
+      button.style.background = "rgba(30, 30, 30, 0.85)";
     } else {
-      buttonIcon.textContent = "译";
+      renderFabIcon();
     }
   }
 
@@ -1326,14 +1641,16 @@
       return;
     }
     buttonIcon.textContent = Math.round(p * 100) + "%";
+    buttonIcon.style.background = "none";
+    buttonIcon.style.color = "#fff";
+    button.style.background = "rgba(30, 30, 30, 0.85)";
   }
 
   function setButtonState() {
     if (!button) {
       return;
     }
-    buttonIcon.textContent = "译";
-    button.style.background = "rgba(30, 30, 30, 0.75)";
+    renderFabIcon();
   }
 
   function showToast(msg) {
@@ -1354,9 +1671,70 @@
         if (toast.parentNode) {
           toast.parentNode.removeChild(toast);
         }
+        // 同步从数组移除，否则 detached 节点引用永久累积（旧实现只 push 不移除）
+        var i = toasts.indexOf(toast);
+        if (i !== -1) {
+          toasts.splice(i, 1);
+        }
       }, 200);
     }, 2500);
     toasts.push(toast);
+    // 兜底：异常情况下 toast 堆积时强制裁剪，防止无限增长
+    if (toasts.length > 20) {
+      var old = toasts.splice(0, toasts.length - 20);
+      old.forEach(function (t) {
+        if (t.parentNode) {
+          t.parentNode.removeChild(t);
+        }
+      });
+    }
+  }
+
+  // 报错弹窗：显示错误日志 + 复制按钮（用户诊断用）
+  function showErrorDialog(title, lines) {
+    if (document.getElementById("suiyi-error-dialog")) {
+      return;
+    }
+    var logText = "【" + title + "】\n" + lines.join("\n") + "\n\n版本: " + (settings.model || "?");
+    var overlay = document.createElement("div");
+    overlay.id = "suiyi-error-dialog";
+    overlay.style.cssText = "position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2147483646; display: flex; align-items: center; justify-content: center;";
+    overlay.innerHTML =
+      '<div style="background:#fff;color:#222;border-radius:12px;padding:20px 24px;width:400px;max-width:92vw;font-family:-apple-system,sans-serif;font-size:13px;box-shadow:0 12px 40px rgba(0,0,0,0.25);">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">' +
+          '<strong style="font-size:15px;">' + title + '</strong>' +
+          '<button id="suiyi-error-close" style="border:none;background:transparent;font-size:18px;cursor:pointer;color:#888;">&times;</button>' +
+        '</div>' +
+        '<textarea id="suiyi-error-log" readonly style="width:100%;height:180px;box-sizing:border-box;padding:8px;border:1px solid #ccc;border-radius:6px;font-size:12px;font-family:monospace;background:#f8f8f8;resize:vertical;">' + logText + '</textarea>' +
+        '<div style="display:flex;gap:10px;margin-top:10px;">' +
+          '<button id="suiyi-error-copy" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;font-size:13px;">复制日志</button>' +
+          '<button id="suiyi-error-dismiss" style="flex:1;padding:8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">知道了</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close() {
+      if (overlay.parentNode) {
+        overlay.parentNode.removeChild(overlay);
+      }
+    }
+    document.getElementById("suiyi-error-close").addEventListener("click", close);
+    document.getElementById("suiyi-error-dismiss").addEventListener("click", close);
+    overlay.addEventListener("mousedown", function (e) {
+      if (e.target === overlay) {
+        close();
+      }
+    });
+    document.getElementById("suiyi-error-copy").addEventListener("click", function () {
+      var ta = document.getElementById("suiyi-error-log");
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch (e) {}
+      var btn = document.getElementById("suiyi-error-copy");
+      btn.textContent = "✓ 已复制";
+      setTimeout(function () { btn.textContent = "复制日志"; }, 1500);
+    });
   }
 
   // ---------- 快捷键 ----------
@@ -1535,6 +1913,7 @@
           '<button id="suiyi-opt-test" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;font-size:13px;">测试连接</button>' +
           '<button id="suiyi-opt-save" style="flex:1;padding:8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">保存</button>' +
         '</div>' +
+        '<button id="suiyi-opt-clearcache" style="width:100%;margin-top:10px;padding:8px;border:1px solid #e5e7eb;border-radius:6px;background:#fff;color:#dc2626;cursor:pointer;font-size:12px;">清除译文缓存（升级后翻译异常时使用）</button>' +
       '</div>';
 
     document.body.appendChild(overlay);
@@ -1665,6 +2044,23 @@
         btn.disabled = false;
       });
     });
+
+    // 清除译文缓存
+    document.getElementById("suiyi-opt-clearcache").addEventListener("click", function () {
+      var btn = document.getElementById("suiyi-opt-clearcache");
+      btn.textContent = "清除中...";
+      btn.disabled = true;
+      clearTranslateCache().then(function () {
+        btn.textContent = "✓ 已清除";
+        btn.disabled = false;
+        setTimeout(function () {
+          btn.textContent = "清除译文缓存（升级后翻译异常时使用）";
+        }, 1500);
+      }).catch(function (err) {
+        btn.textContent = "清除失败：" + String((err && err.message) || err);
+        btn.disabled = false;
+      });
+    });
   }
 
   // ---------- 初始化 ----------
@@ -1684,30 +2080,19 @@
         }, 1200);
       }
 
-      // SPA 页面内容变化时，若处于已翻译状态则重新翻译新内容（增量）
-      var observer = new MutationObserver(debounce(function () {
-        if (translated && !translating) {
-          var missing = collectTexts(settings.translateMode || "page");
-          var fresh = missing.filter(function (unit) {
-            return !isBlockTranslated(unit.el);
-          });
-          if (fresh.length > 0) {
-            translating = true;
-            doTranslate(fresh, {
-              onDone: function () {
-                translating = false;
-              }
-            });
-          }
-        }
-      }, 800));
-      observer.observe(document.body, { childList: true, subtree: true });
+      // 注意：SPA 增量观察器不在这里启动。它只在翻译激活时才需要，
+      // 由 translatePage 调用 ensurePageObserver 启动，restorePage 时 teardownObservers 销毁。
+      // （曾经在此无条件启动，导致不翻译也常驻一个 childList+subtree 全页观察器，
+      //   动态页面 DOM 频繁变动时持续分配 records，是"挂着不用也内存不足"的主因。）
     }).catch(function (err) {
       // 桥未就绪时静默，悬浮窗仍显示
       settings = DEFAULTS;
       buildUI();
     });
   }
+
+  // 页面卸载时统一清理，避免观察器/监听残留（SPA 长会话下尤其重要）
+  window.addEventListener("pagehide", teardownObservers, { once: true });
 
   if (state.isTop && document.body) {
     loadSettingsAndInit();

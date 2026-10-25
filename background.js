@@ -167,27 +167,22 @@ async function requestWithRetry(apiKey, body, model) {
 }
 
 async function requestOnce(apiKey, body) {
-  // 全局限流：并发不超过 8（承接前台 6 路并发）；429 后统一冷却
-  const waitForSlot = function () {
-    if (inflight < 8) {
-      inflight += 1;
-      return Promise.resolve();
+  // 全局限流：并发不超过 8（承接前台 6 路并发）；429 后统一冷却。
+  // 用带上限的等待循环代替 setInterval 轮询：旧实现若 inflight 长期不降回 8 以下，
+  // 80ms 轮询定时器永不停止，会阻止 service worker 休眠并持续消耗资源。
+  let waited = 0;
+  while (inflight >= 8) {
+    await sleep(80);
+    waited += 80;
+    if (waited > 60000) {
+      throw new Error("翻译队列等待超时，请稍后重试");
     }
-    return new Promise(function (resolve) {
-      const timer = setInterval(function () {
-        if (inflight < 8) {
-          clearInterval(timer);
-          inflight += 1;
-          resolve();
-        }
-      }, 80);
-    });
-  };
+  }
+  inflight += 1;
   const now = Date.now();
   if (lastRetryAt > now) {
     await sleep(lastRetryAt - now);
   }
-  await waitForSlot();
   try {
     const res = await fetch(DEEPSEEK_BASE + "/chat/completions", {
       method: "POST",
